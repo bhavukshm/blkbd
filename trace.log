@@ -4,25 +4,44 @@
    layer 2: su as uid 2000     -> 2000
    layer 3: files in /data/local/tmp/btkbd
      total 20
-     -r--r--r-- 1 shell shell 9843 2026-08-04 22:54 btkbd.jar
-     -rw-r--r-- 1 shell shell    6 2026-08-05 00:02 pid
-     -rwxr-xr-x 1 shell shell  256 2026-08-05 00:02 run.sh
-     -rw-rw-rw- 1 shell shell    0 2026-08-05 00:02 server.log
+     -r--r--r-- 1 shell shell 11451 2026-08-05 00:12 btkbd.jar
+     -rw-r--r-- 1 shell shell     6 2026-08-05 00:02 pid
+     -rwxr-xr-x 1 shell shell   256 2026-08-05 00:02 run.sh
+     -rw-rw-rw- 1 shell shell     0 2026-08-05 00:02 server.log
    layer 4: app_process + dex  -> running --probe
      PROBE uid=2000
      PROBE BluetoothHidDevice=yes
      PROBE BluetoothHidDeviceAppSdpSettings=yes
      PROBE BluetoothHidDeviceAppQosSettings=yes
      PROBE BluetoothAdapter=yes
+     SELINUX u:r:su:s0
+     SM bluetooth_manager binder=true
+     SM bluetooth binder=false
+     SM services matching bluetooth: android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default bluetooth_manager
+     ADAPTER route1 getDefaultAdapter=false
+     ADAPTER route3 bluetooth_manager binder=true
+     ADAPTER route3a createAdapter unavailable: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.createAdapter [class android.content.AttributionSource]
+     ADAPTER route3b constructor failed: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.<init> [interface android.bluetooth.IBluetoothManager, class android.content.AttributionSource]
      PROBE adapter=no enabled=false
      PROBE hidDeviceSupported=error java.lang.NullPointerException: null receiver
 
 === helper output (everything below comes straight from the helper) ===
 CONTEXT uid=2000 package=com.android.shell
+ADAPTER route1 getDefaultAdapter=false
+ADAPTER route2 getSystemService=true
+ADAPTER route2 getAdapter=false
+ADAPTER route3 bluetooth_manager binder=true
+ADAPTER route3a createAdapter unavailable: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.createAdapter [class android.content.AttributionSource]
+ADAPTER route3b constructor failed: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.<init> [interface android.bluetooth.IBluetoothManager, class android.content.AttributionSource]
+ERR could not obtain a BluetoothAdapter by any route.
+HINT every route needs ServiceManager to hand this process the bluetooth_manager
+HINT binder. If SELINUX above is not u:r:shell:s0 or u:r:magisk:s0, the SELinux
+HINT domain is likely being denied 'find' on bluetooth_manager_service -
+HINT check: su -c 'logcat -d -b all | grep -i "avc.*bluetooth_manager"'
 FATAL java.lang.IllegalStateException: no BluetoothAdapter
 java.lang.IllegalStateException: no BluetoothAdapter
-	at dev.btkbd.Server.run(Server.java:167)
-	at dev.btkbd.Server.main(Server.java:102)
+	at dev.btkbd.Server.run(Server.java:168)
+	at dev.btkbd.Server.main(Server.java:105)
 	at com.android.internal.os.RuntimeInit.nativeFinishInit(Native Method)
 	at com.android.internal.os.RuntimeInit.main(RuntimeInit.java:369)
 
