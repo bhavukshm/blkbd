@@ -1177,6 +1177,7 @@ emit_sources() {
   import java.io.PrintWriter;
   import java.lang.reflect.Constructor;
   import java.lang.reflect.Method;
+  import java.lang.reflect.Modifier;
   import java.net.InetAddress;
   import java.net.ServerSocket;
   import java.net.Socket;
@@ -1271,6 +1272,10 @@ emit_sources() {
 
       private static void probe() {
           out("PROBE uid=" + Process.myUid());
+          // Adapter construction builds Handlers, which need a Looper - without this
+          // the probe fails for a reason the real run() would never hit.
+          if (Looper.getMainLooper() == null) Looper.prepareMainLooper();
+          context = buildContext();
           String[] classes = {
               "android.bluetooth.BluetoothHidDevice",
               "android.bluetooth.BluetoothHidDeviceAppSdpSettings",
@@ -1473,34 +1478,77 @@ emit_sources() {
               if (a != null) return a;
           }
 
-          // Route 3: build the adapter straight from the binder, bypassing Context
-          // entirely. This is what scrcpy-style headless processes do.
+          // Route 3: construct the adapter ourselves. Signatures differ between
+          // builds, so discover them and fill parameters by type instead of guessing.
           IBinder binder = smGetService("bluetooth_manager");
           out("ADAPTER route3 bluetooth_manager binder=" + (binder != null));
-          if (binder == null) return null;
-
-          try {
-              Method cm = BluetoothAdapter.class.getDeclaredMethod("createAdapter", AttributionSource.class);
-              cm.setAccessible(true);
-              a = (BluetoothAdapter) cm.invoke(null, attributionSource());
-              out("ADAPTER route3a createAdapter=" + (a != null));
-          } catch (Throwable t) {
-              out("ADAPTER route3a createAdapter unavailable: " + t);
+          Object mgr = null;
+          if (binder != null) {
+              try {
+                  mgr = Class.forName("android.bluetooth.IBluetoothManager$Stub")
+                          .getMethod("asInterface", IBinder.class).invoke(null, binder);
+              } catch (Throwable t) {
+                  out("ADAPTER route3 asInterface failed: " + t);
+              }
           }
-          if (a != null) return a;
 
-          try {
-              Class<?> iface = Class.forName("android.bluetooth.IBluetoothManager");
-              Object mgr = Class.forName("android.bluetooth.IBluetoothManager$Stub")
-                      .getMethod("asInterface", IBinder.class).invoke(null, binder);
-              Constructor<?> c = BluetoothAdapter.class.getDeclaredConstructor(iface, AttributionSource.class);
-              c.setAccessible(true);
-              a = (BluetoothAdapter) c.newInstance(mgr, attributionSource());
-              out("ADAPTER route3b constructor=" + (a != null));
-          } catch (Throwable t) {
-              out("ADAPTER route3b constructor failed: " + t);
+          for (Method m : BluetoothAdapter.class.getDeclaredMethods()) {
+              if (!m.getName().equals("createAdapter") || !Modifier.isStatic(m.getModifiers())) continue;
+              Object[] args = buildArgs(m.getParameterTypes(), mgr);
+              if (args == null) { out("ADAPTER route3a skip (unknown params) " + m); continue; }
+              try {
+                  m.setAccessible(true);
+                  a = (BluetoothAdapter) m.invoke(null, args);
+                  out("ADAPTER route3a " + m.getName() + argTypes(m.getParameterTypes()) + " -> " + (a != null));
+                  if (a != null) return a;
+              } catch (Throwable t) {
+                  out("ADAPTER route3a " + m.getName() + argTypes(m.getParameterTypes()) + " failed: " + t);
+              }
+          }
+
+          for (Constructor<?> c : BluetoothAdapter.class.getDeclaredConstructors()) {
+              Object[] args = buildArgs(c.getParameterTypes(), mgr);
+              if (args == null) { out("ADAPTER route3b skip (unknown params) " + c); continue; }
+              try {
+                  c.setAccessible(true);
+                  a = (BluetoothAdapter) c.newInstance(args);
+                  out("ADAPTER route3b ctor" + argTypes(c.getParameterTypes()) + " -> " + (a != null));
+                  if (a != null) return a;
+              } catch (Throwable t) {
+                  out("ADAPTER route3b ctor" + argTypes(c.getParameterTypes()) + " failed: " + t);
+              }
           }
           return a;
+      }
+
+      /** Fill a parameter list by type; null if any parameter is not one we can supply. */
+      private static Object[] buildArgs(Class<?>[] params, Object bluetoothManager) {
+          Object[] args = new Object[params.length];
+          for (int i = 0; i < params.length; i++) {
+              String n = params[i].getName();
+              if (n.equals("android.bluetooth.IBluetoothManager")) {
+                  if (bluetoothManager == null) return null;
+                  args[i] = bluetoothManager;
+              } else if (n.equals("android.content.Context")) {
+                  if (context == null) return null;
+                  args[i] = context;
+              } else if (n.equals("android.content.AttributionSource")) {
+                  args[i] = attributionSource();
+              } else {
+                  return null;
+              }
+          }
+          return args;
+      }
+
+      private static String argTypes(Class<?>[] params) {
+          StringBuilder sb = new StringBuilder("(");
+          for (int i = 0; i < params.length; i++) {
+              if (i > 0) sb.append(',');
+              String n = params[i].getName();
+              sb.append(n.substring(n.lastIndexOf('.') + 1));
+          }
+          return sb.append(')').toString();
       }
 
       private static String shellPackage() {
