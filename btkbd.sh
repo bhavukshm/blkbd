@@ -1167,12 +1167,15 @@ emit_sources() {
   import android.content.AttributionSource;
   import android.content.Context;
   import android.content.ContextWrapper;
+  import android.os.IBinder;
   import android.os.Looper;
   import android.os.Process;
 
   import java.io.BufferedReader;
+  import java.io.FileInputStream;
   import java.io.InputStreamReader;
   import java.io.PrintWriter;
+  import java.lang.reflect.Constructor;
   import java.lang.reflect.Method;
   import java.net.InetAddress;
   import java.net.ServerSocket;
@@ -1279,13 +1282,9 @@ emit_sources() {
               try { Class.forName(c); ok = true; } catch (Throwable t) { ok = false; }
               out("PROBE " + c.substring(c.lastIndexOf('.') + 1) + "=" + (ok ? "yes" : "no"));
           }
-          BluetoothAdapter a = null;
-          try {
-              a = BluetoothAdapter.getDefaultAdapter();
-              out("PROBE adapter=" + (a != null ? "yes" : "no") + " enabled=" + (a != null && a.isEnabled()));
-          } catch (Throwable t) {
-              out("PROBE adapter=error " + t);
-          }
+          dumpServiceVisibility();
+          BluetoothAdapter a = acquireAdapter();
+          out("PROBE adapter=" + (a != null ? "yes" : "no") + " enabled=" + (a != null && a.isEnabled()));
           // getSupportedProfiles() is @hide, but it is the list Config/BluetoothProperties
           // actually produced on this build - the most authoritative answer to
           // "does this ROM support HID Device" short of the profile already running.
@@ -1316,12 +1315,15 @@ emit_sources() {
               out("HINT start with 'su 2000 -c ...' (btkbd.sh does this when your su supports it).");
           }
 
-          adapter = BluetoothAdapter.getDefaultAdapter();
+          adapter = acquireAdapter();
           if (adapter == null) {
-              BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-              if (bm != null) adapter = bm.getAdapter();
+              out("ERR could not obtain a BluetoothAdapter by any route.");
+              out("HINT every route needs ServiceManager to hand this process the bluetooth_manager");
+              out("HINT binder. If SELINUX above is not u:r:shell:s0 or u:r:magisk:s0, the SELinux");
+              out("HINT domain is likely being denied 'find' on bluetooth_manager_service -");
+              out("HINT check: su -c 'logcat -d -b all | grep -i \"avc.*bluetooth_manager\"'");
+              throw new IllegalStateException("no BluetoothAdapter");
           }
-          if (adapter == null) throw new IllegalStateException("no BluetoothAdapter");
           out("ADAPTER enabled=" + adapter.isEnabled());
 
           startControlServer();
@@ -1341,6 +1343,111 @@ emit_sources() {
               out("ERR getProfileProxy(HID_DEVICE) returned false - profile probably disabled in this ROM");
           }
           Looper.loop();
+      }
+
+      private static String readFile(String path) {
+          try {
+              FileInputStream in = new FileInputStream(path);
+              byte[] b = new byte[256];
+              int n = in.read(b);
+              in.close();
+              return n > 0 ? new String(b, 0, n, "UTF-8").trim().replace("\0", "") : "";
+          } catch (Throwable t) {
+              return "?";
+          }
+      }
+
+      private static AttributionSource attributionSource() {
+          return new AttributionSource.Builder(Process.myUid()).setPackageName(shellPackage()).build();
+      }
+
+      /** android.os.ServiceManager.getService(name), reflectively. */
+      private static IBinder smGetService(String name) {
+          try {
+              Class<?> sm = Class.forName("android.os.ServiceManager");
+              Method m = sm.getMethod("getService", String.class);
+              return (IBinder) m.invoke(null, name);
+          } catch (Throwable t) {
+              out("SM getService(" + name + ") threw " + t);
+              return null;
+          }
+      }
+
+      private static void dumpServiceVisibility() {
+          out("SELINUX " + readFile("/proc/self/attr/current"));
+          out("SM bluetooth_manager binder=" + (smGetService("bluetooth_manager") != null));
+          out("SM bluetooth binder=" + (smGetService("bluetooth") != null));
+          try {
+              Class<?> sm = Class.forName("android.os.ServiceManager");
+              String[] all = (String[]) sm.getMethod("listServices").invoke(null);
+              StringBuilder sb = new StringBuilder();
+              if (all != null) {
+                  for (String s : all) if (s != null && s.toLowerCase().contains("bluetooth")) sb.append(s).append(' ');
+              }
+              out("SM services matching bluetooth: " + (sb.length() > 0 ? sb.toString().trim() : "(none visible)"));
+          } catch (Throwable t) {
+              out("SM listServices threw " + t);
+          }
+      }
+
+      /**
+       * getDefaultAdapter() returns null whenever ServiceManager will not hand this
+       * process the bluetooth_manager binder, and getSystemService() on a synthetic
+       * context is no more reliable. So try every route and say which one worked.
+       */
+      private static BluetoothAdapter acquireAdapter() {
+          BluetoothAdapter a = null;
+
+          try {
+              a = BluetoothAdapter.getDefaultAdapter();
+              out("ADAPTER route1 getDefaultAdapter=" + (a != null));
+          } catch (Throwable t) {
+              out("ADAPTER route1 threw " + t);
+          }
+          if (a != null) return a;
+
+          if (context != null) {
+              try {
+                  BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+                  out("ADAPTER route2 getSystemService=" + (bm != null));
+                  if (bm != null) {
+                      a = bm.getAdapter();
+                      out("ADAPTER route2 getAdapter=" + (a != null));
+                  }
+              } catch (Throwable t) {
+                  out("ADAPTER route2 threw " + t);
+              }
+              if (a != null) return a;
+          }
+
+          // Route 3: build the adapter straight from the binder, bypassing Context
+          // entirely. This is what scrcpy-style headless processes do.
+          IBinder binder = smGetService("bluetooth_manager");
+          out("ADAPTER route3 bluetooth_manager binder=" + (binder != null));
+          if (binder == null) return null;
+
+          try {
+              Method cm = BluetoothAdapter.class.getDeclaredMethod("createAdapter", AttributionSource.class);
+              cm.setAccessible(true);
+              a = (BluetoothAdapter) cm.invoke(null, attributionSource());
+              out("ADAPTER route3a createAdapter=" + (a != null));
+          } catch (Throwable t) {
+              out("ADAPTER route3a createAdapter unavailable: " + t);
+          }
+          if (a != null) return a;
+
+          try {
+              Class<?> iface = Class.forName("android.bluetooth.IBluetoothManager");
+              Object mgr = Class.forName("android.bluetooth.IBluetoothManager$Stub")
+                      .getMethod("asInterface", IBinder.class).invoke(null, binder);
+              Constructor<?> c = BluetoothAdapter.class.getDeclaredConstructor(iface, AttributionSource.class);
+              c.setAccessible(true);
+              a = (BluetoothAdapter) c.newInstance(mgr, attributionSource());
+              out("ADAPTER route3b constructor=" + (a != null));
+          } catch (Throwable t) {
+              out("ADAPTER route3b constructor failed: " + t);
+          }
+          return a;
       }
 
       private static String shellPackage() {
@@ -1702,6 +1809,11 @@ public final class Looper {
     public static void loop() { }
 }
 JAVA_LOOPER
+
+  cat > "$STUBS/android/os/IBinder.java" <<'JAVA_IBINDER'
+package android.os;
+public interface IBinder { }
+JAVA_IBINDER
 
   cat > "$STUBS/android/os/Process.java" <<'JAVA_PROC'
 package android.os;
