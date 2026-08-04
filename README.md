@@ -10,6 +10,10 @@ send_key ENTER
 send_key CTRL+ALT+DELETE
 ```
 
+**Status: working on Android 16 (AOSP), verified end to end** — profile registration, pairing and
+typing. The notes below reflect what the device actually did, including the things that went wrong on
+the way, since most of them are traps anyone repeating this will hit.
+
 ## Read this first: why it isn't pure bash
 
 Becoming a Bluetooth HID *Device* means registering an SDP record plus a HID report descriptor with
@@ -18,13 +22,13 @@ reachable **only** through `android.bluetooth.BluetoothHidDevice` (API 28+). No 
 `service call` or `setprop` exposes it — root does not help, because it is a missing interface rather
 than a permission problem.
 
-So `btkbd.sh` carries a ~350-line Java helper *inside itself*, compiles it on the phone once, and runs
+So `btkbd.sh` carries a ~500-line Java helper *inside itself*, compiles it on the phone once, and runs
 it headless via `app_process`. Everything else — capability detection, enabling the profile, the
-keymap, HID report generation, pairing flow, diagnostics — is bash. You only ever run bash.
+keymap, HID report generation, pairing, diagnostics — is bash. You only ever run bash.
 
 A side benefit of the headless design: `HidDeviceService.registerApp()` rejects callers whose uid is
-`>= FIRST_APPLICATION_UID` (10000) unless the app is *visible in the foreground*. Our helper runs as
-uid 2000, so it skips that gate entirely — a normal APK would get silently unregistered whenever it
+`>= FIRST_APPLICATION_UID` (10000) unless the app is *visible in the foreground*. The helper runs as
+uid 2000, so it skips that gate entirely — a normal APK would be silently unregistered whenever it
 left the screen.
 
 ## Architecture
@@ -60,55 +64,57 @@ apps on the phone cannot type on your PC.
 | File | What it is |
 |---|---|
 | `btkbd.sh` | Everything: the CLI, the keymap, and the embedded Java helper + API stubs |
-| `demo.sh` | The worked example |
+| `demo.sh` | Minimal example |
+| `humantype.sh` | Types a file the way a person would — uneven speed, pauses, typos + backspace |
 | `README.md` | This file |
 
 Created on the phone at runtime:
 
 | Path | Purpose |
 |---|---|
-| `~/.btkbd/` | build dir (extracted Java, stubs, classes, jar) and `state` (port, token, last MAC) |
-| `/data/local/tmp/btkbd/btkbd.jar` | the built dex, owned by uid 2000 |
+| `~/.btkbd/` | build dir, `state` (port, token, last MAC), `launch.log` |
+| `/data/local/tmp/btkbd/btkbd.jar` | the built dex, mode `444`, owned by uid 2000 |
 | `/data/local/tmp/btkbd/server.log` | helper log — the first place to look |
 
 ## Dependencies
 
 **On the phone**
 
-- rooted Android 9+ (built and reasoned for Android 16 / API 36). Magisk strongly preferred: its
-  `resetprop` is the only reliable way to set the profile property (see below).
-- Termux, plus:
+- rooted Android 9+ (built and verified on Android 16 / API 36). Magisk preferred: `resetprop` is the
+  only reliable way to set the profile property.
+- Termux, plus a **real JVM** — this matters:
 
 ```bash
 pkg update && pkg install openjdk-17 d8
-# optional: pkg install netcat-openbsd   (only if your bash lacks /dev/tcp)
 ```
 
-`d8` pulls in `openjdk-21`; `jar` comes from the openjdk package. `ecj` and `dx` are used
-automatically as fallbacks if `javac`/`d8` are missing.
+Do **not** rely on `ecj`. Termux's `ecj` runs on ART via `dalvikvm`, and on Android 16 an ART-hosted
+compiler can abort with `Native registration unable to find class '…/PerfettoTrace'`. `openjdk-17`
+is a genuine OpenJDK port and is unaffected. `d8` pulls in `openjdk-21`; `jar` comes from openjdk.
 
 **On the Windows PC:** nothing.
 
-**No `android.jar` download is needed.** The helper is compiled against ~12 small hand-written
-`android.*` stubs that are passed to `d8` as `--classpath` only, so they never enter the dex; at
-runtime the real framework classes are used (parent-first class loading).
+**No `android.jar` download is needed.** The helper compiles against ~13 small hand-written
+`android.*` stubs passed to `d8` as `--classpath` only, so they never enter the dex; at runtime the
+real framework classes are used (parent-first class loading).
 
 ## Install and run
 
 ```bash
-# copy btkbd.sh and demo.sh to the phone (USB/MTP to /sdcard is fine — no adb needed)
-mkdir -p ~/btkbd && cp /sdcard/Download/btkbd.sh /sdcard/Download/demo.sh ~/btkbd/
+# copy the scripts to the phone (USB/MTP to /sdcard is fine — no adb needed)
+mkdir -p ~/btkbd && cp /sdcard/Download/btkbd.sh /sdcard/Download/humantype.sh ~/btkbd/
 cd ~/btkbd
 
 bash btkbd.sh check          # explains every check, ends in PASS/FAIL
 bash btkbd.sh enable         # only if check says the profile is disabled
-bash btkbd.sh build          # compile the helper (once)
+bash btkbd.sh build          # compile the helper (once, and after any script update)
 bash btkbd.sh start          # register the HID keyboard
-bash btkbd.sh pair           # first-time pairing, initiated from Windows
+bash btkbd.sh pair           # first-time pairing
 bash btkbd.sh type "hello"   # types on the PC
-
-bash btkbd.sh up             # shorthand: check -> enable -> build -> start -> connect
 ```
+
+**If you copy these files from Windows, make sure they end up with LF line endings.** CRLF breaks
+every path the script builds; `btkbd.sh` detects it and tells you to run `sed -i 's/\r$//' btkbd.sh`.
 
 ## Commands
 
@@ -116,59 +122,124 @@ bash btkbd.sh up             # shorthand: check -> enable -> build -> start -> c
 |---|---|
 | `check` | 9 explained checks, then PASS/FAIL |
 | `enable [--persist]` | enable a present-but-disabled HID Device profile |
-| `build` | compile the embedded helper |
+| `build` | compile the embedded helper — **re-run after updating `btkbd.sh`** |
 | `start` / `stop` / `restart` | run the helper (this is what registers the keyboard) |
-| `pair` | guided first-time pairing |
-| `connect [MAC]` / `disconnect` | reuse an existing bond |
-| `status` | registered / connected / bonded |
+| `trace` | run the helper in the **foreground**, printing everything — use when `start` fails |
+| `pair` | guided first-time pairing (refuses unless the keyboard is registered) |
+| `connect [MAC]` / `disconnect` | open/close the HID link over an existing bond |
+| `bond MAC` | phone-initiated pairing |
+| `unbond [MAC]` | clear a stale bond/link key on the phone side |
+| `status` | version / registered / bond / connection state |
 | `type "text"` / `key SPEC` / `raw HEX` | send input |
 | `keys` | list every key name |
 | `doctor` | full diagnostics + log tails |
 | `probe` | runtime capability probe |
 
+After changing `btkbd.sh` you must `build` **and** `restart` — the Java is baked into `btkbd.jar`, so a
+running helper keeps the old command set. The script detects this: it carries `BTKBD_PROTO`, the helper
+reports `version=`, and a mismatch prints "rebuild and restart it" instead of letting you hit
+`ERR unknown-command`.
+
+## Pairing and connecting
+
+Three separate things, easy to confuse:
+
+| State | Meaning | Shown by |
+|---|---|---|
+| **registered** | the phone advertises an HID keyboard service | `status` → `registered=1` |
+| **bonded** | the two devices share a link key (survives reboots) | `status` → `bond=BONDED` |
+| **connected** | an L2CAP link is actually open; only now can you type | `status` → `state=CONNECTED` |
+
+Windows keeps a bonded HID device in its list permanently, so seeing the phone there proves nothing
+about the connection.
+
+### First-time pairing
+
+The helper must be registered first — pair with no HID app registered and the phone advertises no
+keyboard service, which is one cause of Windows' "Couldn't connect". `pair` refuses to run unless
+`registered=1`.
+
+**Pairing from the PC is the most reliable direction, and is what worked here.** On Windows: Settings →
+Bluetooth & devices → Add device → *Everything else* → pick the phone, and accept any prompt that
+appears **on the phone's screen**. Windows then reads the SDP record, sees `SUBCLASS1_KEYBOARD` plus
+the report descriptor, and binds its in-box HID driver. Check **Device Manager → Keyboards** for an
+*HID Keyboard Device*.
+
+Alternatives, in order of reliability:
+
+1. **Pair from Android's own UI** — `su -c 'am start -a android.settings.BLUETOOTH_SETTINGS'`, tap the
+   PC while its "Add a device" dialog is open. Uses the system bonding path; always permitted.
+2. **`bash btkbd.sh bond <PC-MAC>`** — phone-initiated. Convenient but the least reliable: from a
+   headless shell process `createBond()` is subject to restrictions and can be refused locally (see
+   troubleshooting).
+
+After pairing once, `connect` reuses the bond forever — no re-pairing after reboots.
+
+### Stale link keys
+
+If Windows offers to *add* the phone (so Windows has no key) while the phone still holds a bond for it,
+authentication fails and Windows reports "Couldn't connect". Clear **both** sides:
+
+```bash
+bash btkbd.sh status                       # is bond=BONDED for that MAC?
+bash btkbd.sh unbond <PC-MAC>              # clear it on the phone
+# Windows: Settings > Bluetooth & devices > (phone) > Remove device
+bash btkbd.sh pair                         # pair again
+```
+
+`pair` warns about this automatically when it sees existing bonds.
+
+### Reconnecting
+
+The helper re-dials on disconnect (12 attempts, 5 s apart) because Windows does not reliably
+re-initiate after sleep. `disconnect` turns that off; `AUTORECONNECT 0` disables it for the session.
+`connect` with no MAC targets the virtually-cabled host reported by `onAppStatusChanged`.
+
 ## Enabling the profile
 
-Most phones ship with the HID Device profile **off**, and the check will say so. The mechanics, which
+Most phones ship with the HID Device profile **off**, and `check` will say so. The mechanics, which
 `btkbd.sh enable` automates:
 
 - `HidDeviceService.isEnabled()` is `BluetoothProperties.isProfileHidDeviceEnabled().orElse(false)` —
   the property is `bluetooth.profile.hid.device.enabled`, and **unset means off**.
 - SELinux labels that property `bluetooth_config_prop`, writable only by `vendor_init`. **Plain
-  `setprop` is denied**, even as root. Magisk's `resetprop -n` bypasses `property_service` and works.
-- The Bluetooth app builds its profile list in a `static final` array, so the value is latched when
-  its `Config` class loads. Toggling the adapter is not enough — the **process** must die. `enable`
-  does `pkill -f com.android.bluetooth` (and the `com.google.` GMS variant).
-- Most reliable of all: `bash btkbd.sh enable --persist` writes a root-manager module `system.prop`
-  (`/data/adb/modules/btkbd-hid/`) so the property is set at post-fs-data — before Bluetooth ever
-  starts — then reboot. `/system` is never touched, and no ROM reflash is involved.
-- How support is detected: `check` reports one of four verdicts — `running` (profile live), `present`
-  (the class is in the Bluetooth APK, or `getSupportedProfiles()` lists HID_DEVICE), `absent` (the APK
-  was read and the class is not there), or `unknown` (couldn't tell — treated as a warning, and `enable`
-  still tries). Note that `dumpsys package <pkg>` is **not** usable for this: it only lists components
-  with intent filters, and `HidDeviceService` has none, so it looks missing on every ROM.
-- If the verdict is `absent`, or the property is `true`
-  after a reboot and the service still does not appear, the ROM's native stack was built without HID
-  Device support. Only replacing the Bluetooth APEX / ROM would help; the script says so and stops
-  rather than doing anything drastic. OEMs commonly reported to ship it disabled or stripped: OnePlus,
-  Motorola, LG, Huawei, Sony, Xiaomi/MIUI.
+  `setprop` is denied even as root.** Magisk's `resetprop -n` bypasses `property_service` and works.
+- The Bluetooth app builds its profile list in a `static final` array, so the value is latched when its
+  `Config` class loads. Toggling the adapter is not enough — the **process** must die. `enable` does
+  `pkill -f com.android.bluetooth` (and the `com.google.` GMS variant).
+- Most reliable: `bash btkbd.sh enable --persist` writes a root-manager module `system.prop`
+  (`/data/adb/modules/btkbd-hid/`) so the property is applied at post-fs-data, before Bluetooth ever
+  starts, then reboot. `/system` is untouched and no ROM reflash is involved.
+- How support is detected: `check` reports one of four verdicts — `running`, `present` (the class is in
+  the Bluetooth APK, or `getSupportedProfiles()` lists HID_DEVICE = 19), `absent` (the APK was read and
+  the class is not there), or `unknown` (couldn't tell — a warning, and `enable` still tries). Note
+  that `dumpsys package <pkg>` is **not** usable for this: it only lists components with intent
+  filters, and `HidDeviceService` has none, so it looks missing on every ROM.
+- OEMs commonly reported to ship it disabled or stripped: OnePlus, Motorola, LG, Huawei, Sony, Xiaomi.
 
-## Pairing flow
+## Running headless: what Android 16 requires
 
-1. `start` registers the SDP record: service name, subclass `SUBCLASS1_KEYBOARD` (`0x40`), and the
-   report descriptor. Any host that queries the phone now sees a keyboard service.
-2. `pair` makes the adapter connectable + discoverable (via `setScanMode`; if that hidden API is
-   refused it opens Android's Bluetooth settings, which has the same effect while the screen is open).
-3. **Windows initiates the bond:** Settings → Bluetooth & devices → Add device → *Everything else* →
-   pick your phone. Confirm the prompt on the phone if one appears.
-4. Windows reads the SDP record and loads its built-in HID keyboard driver. Verify in
-   **Device Manager → Keyboards / Human Interface Devices** — an *HID Keyboard Device* node appears.
-5. Reports flow over the L2CAP interrupt channel. After this, `connect` reuses the bond forever.
+Non-obvious things the helper must do, each of which produced a failure before it was handled:
 
-**Expect the phone to still look like a phone in the Windows device list.** AOSP defines the HID
-class-of-device constants in `btif_hd.cc` but never applies them on `registerApp`, so the phone keeps
-advertising CoD "Phone" while offering an HID service. Typing works regardless; only the icon/label is
-wrong. Fixing the icon means overriding class-of-device at ROM level (e.g. a Bluetooth++ style Magisk
-module) and is out of scope here.
+- **Run as uid 2000.** Android resolves that uid to `com.android.shell`, which holds
+  `BLUETOOTH_CONNECT`; `start` also `pm grant`s it. Running as root instead risks an attribution
+  mismatch, because the Bluetooth stack rewrites `ROOT_UID` → `SYSTEM_UID` while `Binder.getCallingUid()`
+  stays 0.
+- **A FakeContext.** `ActivityThread.systemMain().getSystemContext()` yields package `android` / uid
+  1000, which fails AttributionSource validation. The helper wraps it and overrides `getPackageName()`,
+  `getOpPackageName()` and `getAttributionSource()` for uid 2000 / `com.android.shell`.
+- **Install the mainline service manager.** Bluetooth is a mainline module, so `BluetoothAdapter` does
+  not use `ServiceManager.getService()` — it asks `BluetoothFrameworkInitializer` for a
+  `BluetoothServiceManager`, which `ActivityThread` installs during normal app binding. A headless
+  `app_process` never does that, so **every** adapter route returns null. The helper calls
+  `BluetoothFrameworkInitializer.setBluetoothServiceManager(new BluetoothServiceManager())` first; then
+  `getDefaultAdapter()` works.
+- **Prepare a Looper.** Adapter construction creates `Handler`s; without `Looper.prepareMainLooper()`
+  you get `NPE: … Looper.mQueue on a null object reference`.
+- **A read-only dex.** ART refuses to load a dex writable by the loading uid, so the jar is `chmod 444`.
+- **Survive detachment.** Android 12+ reaps apps' detached children, so `start` sets
+  `settings_enable_monitor_phantom_procs=false` and `max_phantom_processes`, then tries two launch
+  strategies: detaching inside `su`, and keeping the `su` client alive as a Termux-side job.
 
 ## The HID report descriptor
 
@@ -190,15 +261,18 @@ A1 01        Collection (Application)
 C0           End Collection
 ```
 
-Report layout is `[modifiers, 0x00, k1..k6]`. Notes on the choices:
+Report layout is `[modifiers, 0x00, k1..k6]`. Notes:
 
-- Logical maximum is written as the single byte `25 73`, not the two-byte `26 FF 00` form; the wide
-  form is what Windows hosts have been reported to reject. `0x73` (F24) still covers every key mapped.
+- Logical maximum is the single byte `25 73`, not the two-byte `26 FF 00` form; the wide form is what
+  Windows hosts have been reported to reject. `0x73` (F24) covers every key mapped.
 - The LED output collection matters: Windows sends a SET_REPORT during setup, and the helper answers
   `onGetReport` too, so the handshake completes instead of stalling.
+- Every keystroke is a press report followed by an all-zero release — which is also why repeated
+  characters (the `ll` in "Hello") come out correctly.
 
-Every keystroke is a press report followed by an all-zero release report — which is also why repeated
-characters (the `ll` in "Hello") come out correctly.
+**Expect the phone to still look like a phone in Windows' device list.** AOSP defines HID
+class-of-device constants in `btif_hd.cc` but never applies them on `registerApp`, so the phone keeps
+advertising CoD "Phone". Typing works regardless; only the icon/label is wrong.
 
 ## Bash API
 
@@ -223,37 +297,66 @@ send_raw  0200040000000000          # raw 8-byte report, hex
   SLASH SEMICOLON QUOTE GRAVE BACKSLASH LBRACKET RBRACKET`) and shifted names (`BANG AT HASH DOLLAR
   PERCENT CARET AMP STAR LPAREN RPAREN UNDERSCORE PLUS LBRACE RBRACE PIPE COLON DQUOTE TILDE LT GT
   QUESTION`). `bash btkbd.sh keys` prints the full list.
+- **Errors are reported, not swallowed:** a refused keystroke prints why — `not-connected` (run
+  `connect`), `no-host` (pair first), or `not-registered` (run `start`).
 - **Tuning:** `BTKBD_DELAY_MS` (default 6) is the pause after each report, applied helper-side. Raise
   it if Windows drops keys; lower it for speed.
 
-## What runs where
+## humantype.sh — typing like a person
 
-| Layer | Examples | Why it must be there |
+Types a file with uneven rhythm, pauses to think, and occasional typos corrected with BACKSPACE.
+
+```bash
+bash humantype.sh mycode.py             # once
+bash humantype.sh mycode.py 3           # three times
+REPEAT_COUNT=0 bash humantype.sh f.py   # forever (Ctrl-C stops, releasing all keys)
+DRY_RUN=1 bash humantype.sh f.py        # preview in the terminal, sends nothing
+TYPO_CHANCE=15 CHAR_MS_MAX=250 bash humantype.sh f.py
+```
+
+The file is read inside the script and typed line by line. Every knob is a constant at the top of the
+script and can be overridden from the environment:
+
+| Constant | Default | Meaning |
 |---|---|---|
-| **Bash only** | all detection (`getprop`, `pm`, `dumpsys`), the property flip, restarting the stack, the keymap, HID report bytes, pairing orchestration, diagnostics, logs | shell-reachable state and plain byte arithmetic |
-| **Android API required** | `registerApp`, SDP record, report descriptor, `sendReport`, `connect`/`disconnect`, connection callbacks, `setScanMode` | no shell surface exists for HID Device — the entire reason the Java helper exists |
-| **Root required** | `su 2000` to run as shell uid, writing `/data/local/tmp/btkbd`, `resetprop`, killing the Bluetooth process, `pm grant`/`appops` for `com.android.shell`, `dumpsys`/`logcat` for diagnostics | shell/system-owned resources |
-| **`BluetoothHidDevice` required** | being a keyboard at all | API 28+, and the profile must be present *and* enabled in the ROM |
+| `REPEAT_COUNT` | 1 | how many times to type the file; **0 = forever** |
+| `REPEAT_PAUSE_S` | 8 | pause between passes |
+| `START_DELAY_S` | 5 | grace period to focus the target window |
+| `CHAR_MS_MIN` / `CHAR_MS_MAX` | 45 / 170 | per-character delay range |
+| `FAST_WORD_CHANCE` / `SLOW_WORD_CHANCE` | 35 / 20 | % of words typed in a burst / hesitantly |
+| `WORD_PAUSE_MS_MIN` / `_MAX` | 60 / 380 | pause after each word |
+| `LINE_PAUSE_MS_MIN` / `_MAX` | 350 / 1400 | pause after each line |
+| `THINK_CHANCE` | 7 | % chance of a 2–3 s stall before a word |
+| `THINK_MS_MIN` / `_MAX` | 1800 / 3200 | length of those stalls |
+| `THINK_AFTER_SYMBOLS` | 1 | also stall after lines ending in `}` `;` `:` or blank lines |
+| `TYPO_CHANCE` | 6 | % chance per word (words ≥ 3 chars) |
+| `TYPO_NOTICE_MS_MIN` / `_MAX` | 180 / 700 | delay before "noticing" the mistake |
+| `AUTO_INDENT` | 0 | set to 1 for editors that auto-indent (strips leading whitespace) |
+| `TRAILING_ENTER` | 1 | press ENTER after the last line |
+| `DRY_RUN` | 0 | 1 = print instead of typing |
+
+Three kinds of mistake are produced — an extra character, a wrong character mid-word, and two
+characters transposed — each after a QWERTY-neighbour slip (`d` → `s`/`f`/`e`…), noticed after a beat
+and corrected. Typo injection was verified by replaying the backspaces: the resulting text is identical
+to the source file at typo rates from 0 % to 100 %.
+
+**`AUTO_INDENT` matters for code.** Notepad does not auto-indent, so leave it 0 and the file's own
+indentation is typed. In an editor/IDE that auto-indents, set it to 1 or indentation compounds.
 
 ## Testing procedure
 
-1. `bash btkbd.sh check` — read the explained checks. Expect `PASS`, or a `FAIL` on the property /
-   `HidDeviceService` checks.
-2. `bash btkbd.sh enable` if needed, then `check` again. If it only works after `--persist` + reboot,
-   that is normal on stock SELinux.
-3. `bash btkbd.sh build` — expect `installed /data/local/tmp/btkbd/btkbd.jar` and a probe showing
-   `BluetoothHidDevice=yes`.
-4. `bash btkbd.sh start` — expect `listening on 127.0.0.1:8722` then
-   `HID keyboard registered with the Bluetooth stack`; `server.log` contains `READY`.
-5. `bash btkbd.sh pair` — pair from Windows. Confirm an *HID Keyboard Device* in Device Manager.
-6. `bash btkbd.sh status` — expect `registered=1 state=CONNECTED host=<MAC>`.
-7. Focus Notepad on the PC, then `bash btkbd.sh type "hello world"`.
-8. `bash btkbd.sh key ENTER`, `key CTRL+A`, `key ALT+TAB`, `key WIN+R` — each behaves like a real key.
-9. `bash demo.sh` — the two lines land in Notepad.
-10. Edge sweep: `bash btkbd.sh type '!@#$%^&*()_+{}|:"<>?~'` and `bash btkbd.sh type 'aa  bb'`
-    (repeated characters, double spaces).
-11. `bash btkbd.sh stop` → Windows shows it disconnected; `bash btkbd.sh connect` restores it with no
-    re-pairing.
+1. `bash btkbd.sh check` — expect PASS, or a FAIL on the property / `HidDeviceService` checks.
+2. `bash btkbd.sh enable` if needed (expect `--persist` + reboot on stock SELinux), then `check` again.
+3. `bash btkbd.sh build` — expect `installed …btkbd.jar` and a probe ending `hidDeviceSupported=yes`.
+4. `bash btkbd.sh start` — expect `listening on 127.0.0.1:8722` and
+   `HID keyboard registered with the Bluetooth stack`. If it fails, `bash btkbd.sh trace` shows why.
+5. `bash btkbd.sh pair` — pair from Windows; confirm an *HID Keyboard Device* in Device Manager.
+6. `bash btkbd.sh status` — expect `registered=1 bond=BONDED state=CONNECTED`.
+7. Focus Notepad, then `bash btkbd.sh type "hello world"`.
+8. `key ENTER`, `key CTRL+A`, `key ALT+TAB`, `key WIN+R` — each behaves like a real key.
+9. `bash demo.sh`, then `DRY_RUN=1 bash humantype.sh somefile.py` and finally the real run.
+10. Edge sweep: `type '!@#$%^&*()_+{}|:"<>?~'` and `type 'aa  bb'` (repeats, double spaces).
+11. `stop` → Windows shows it disconnected; `connect` restores it without re-pairing.
 12. Reboot the phone → `bash btkbd.sh up` reconnects using the existing bond.
 
 ## Diagnostics
@@ -261,66 +364,74 @@ send_raw  0200040000000000          # raw 8-byte report, hex
 `bash btkbd.sh doctor` runs all of it. Individually:
 
 ```bash
-bash btkbd.sh status                                   # registered / connected / bonded
-su -c 'tail -f /data/local/tmp/btkbd/server.log'       # helper log (READY, EVENT, ERR lines)
-su -c 'dumpsys bluetooth_manager | grep -i hid'        # stack's view of the profile
-su -c 'dumpsys package com.android.bluetooth | grep -i HidDeviceService'
+bash btkbd.sh status
+bash btkbd.sh trace                                    # foreground helper, everything visible
+su -c 'tail -f /data/local/tmp/btkbd/server.log'       # READY / EVENT / ERR / RUNSH lines
+su -c 'dumpsys bluetooth_manager | grep -i hid'
 getprop bluetooth.profile.hid.device.enabled
 su -c 'dumpsys package com.android.shell | grep -i BLUETOOTH_CONNECT'
-su -c 'logcat -b all | grep -iE "hid|btkbd"'           # live
-su -c 'ps -A | grep btkbd'                             # is the helper alive
+su -c 'logcat -b all | grep -iE "hid|btkbd"'
+su -c 'ps -A | grep btkbd'
 bash btkbd.sh raw 0200040000000000; bash btkbd.sh raw 0000000000000000   # one raw keystroke
 ```
 
-HCI-level capture, when you need to see the actual L2CAP traffic:
+`dumpsys bluetooth` does **not** exist on Android 13+ — the stack moved into the
+`com.android.btservices` APEX and `IBluetooth` is not registered with servicemanager. "Can't find
+service: bluetooth" is expected; use `bluetooth_manager`.
+
+HCI-level capture:
 
 ```bash
 su -c 'setprop persist.bluetooth.btsnoopenable true'   # then restart Bluetooth
 # capture: /data/misc/bluetooth/logs/btsnoop_hci.log   (open in Wireshark)
 ```
 
-### Common failures
+### Failures actually hit on Android 16, and what they mean
 
 | Symptom | Cause / fix |
 |---|---|
-| `check` fails on the property | Expected on stock. `enable`, and if `setprop` was denied use `enable --persist` + reboot. |
-| `dumpsys bluetooth` → "Can't find service: bluetooth" | **Expected, not a fault.** Since Android 13 the stack lives in the `com.android.btservices` APEX and `IBluetooth` is not registered with servicemanager. Use `dumpsys bluetooth_manager`. |
-| "the HID Device profile is not in this ROM's Bluetooth app" | Only reported when the script actually read the Bluetooth APK and found no `HidDeviceService`; it prints the APK path and the grep count so you can verify with `grep -ac HidDeviceService <apk>`. If instead you see "could not confirm", detection was inconclusive and `enable` proceeds anyway. |
-| `HidDeviceService` never appears after `enable` | Property not applied before Bluetooth started (`--persist` + reboot), or the ROM stripped the profile. |
-| `ERR SecurityException on registerApp` | Helper is not running as uid 2000, or `com.android.shell` lacks `BLUETOOTH_CONNECT`. `start` grants it; check `status` for `uid=2000`. See *APK fallback*. |
-| `registerApp returned false` | Profile not enabled, or the adapter is off. |
-| Paired but nothing types | Windows bonded it as a phone and never bound the HID driver. Remove the device on Windows, then `pair` again. |
+| `Native registration unable to find class '…/PerfettoTrace'` during build | The compiler was ART-hosted (`ecj`). `pkg install openjdk-17` so `javac` is used. |
+| `check` fails on the property | Expected on stock. `enable`, and if `setprop` was denied, `enable --persist` + reboot. |
+| "HidDeviceService is not part of this ROM" | Only trustworthy when it prints the APK path and a grep count of 0. Verify with `grep -ac HidDeviceService <apk>`. |
+| `dumpsys bluetooth` → "Can't find service" | Expected on 13+; not a fault. |
+| `helper did not start`, empty log | Look at `~/.btkbd/launch.log` and the `RUNSH …` lines. `RUNSH start` with nothing after it means it was killed (phantom reaper); `RUNSH app_process exited rc=N` means it exited by itself. |
+| `no BluetoothAdapter` | The mainline `BluetoothServiceManager` was not installed — fixed in the helper; rebuild if you see this. |
+| `EADDRINUSE` / `control port already in use` | A helper is already running. `bash btkbd.sh status`, or `stop` first. `trace` stops it for you. |
+| `ERR unknown-command …` | The running helper is an older build. `build` then `restart` (Ctrl-C and re-run a `trace` session). |
+| `ERR createBond-refused` immediately | The local stack rejected it before anything went on air — usually a stale internal bond entry. `unbond`, cycle Bluetooth, retry; or pair from the PC / Android UI instead. |
+| Windows: "Couldn't connect" | Stale link key on one side (clear both, see *Stale link keys*), or the helper was not registered when you paired. |
+| Paired but nothing types | `status`: `bond=BONDED state=DISCONNECTED` → run `connect`. |
 | Drops characters | Raise `BTKBD_DELAY_MS` (e.g. `BTKBD_DELAY_MS=15`). |
 | Dies when the screen sleeps | `termux-wake-lock`, and exempt Termux from battery optimisation. |
 | Wrong punctuation on the PC | The Windows keyboard layout is not US — see Limitations. |
 
-## APK fallback
+## What runs where
 
-If a future build refuses `registerApp` from a shell process even as uid 2000 with
-`BLUETOOTH_CONNECT` granted, the same `Server.java` can be wrapped in a no-UI APK with a foreground
-service (buildable on-device with `aapt` + `apksigner`, both in Termux, linking against
-`/system/framework/framework-res.apk`) and installed with `su -c 'pm install -g'`. The bash CLI and
-the line protocol do not change — only how the helper is launched. Note the trade-off: an APK is
-subject to the foreground-importance check in `registerApp()` that the headless helper avoids, so it
-must keep a visible foreground service notification.
+| Layer | Examples | Why it must be there |
+|---|---|---|
+| **Bash only** | detection (`getprop`, `pm`, `dumpsys`), the property flip, restarting the stack, the keymap, HID report bytes, pairing orchestration, human-like typing, diagnostics | shell-reachable state and plain byte arithmetic |
+| **Android API required** | `registerApp`, SDP record, report descriptor, `sendReport`, `connect`/`disconnect`, `createBond`/`removeBond`, connection callbacks, `setScanMode` | no shell surface exists for HID Device — the reason the Java helper exists |
+| **Root required** | `su 2000` to run as shell uid, writing `/data/local/tmp/btkbd`, `resetprop`, killing the Bluetooth process, `pm grant`/`appops`, phantom-process settings, `dumpsys`/`logcat` | shell/system-owned resources |
+| **`BluetoothHidDevice` required** | being a keyboard at all | API 28+, and the profile must be present *and* enabled in the ROM |
 
 ## Limitations and compatibility notes
 
-- **US-QWERTY assumption.** HID transmits scancodes, not characters. If Windows uses a non-US layout,
-  punctuation comes out wrong; letters and digits are fine. Non-ASCII/Unicode is not supported (that
-  would need Windows Alt-code sequences).
-- Requires the ROM to both ship and enable `HidDeviceService`; many OEM ROMs do not.
-- Classic BR/EDR HID only, not BLE/HOGP. One host at a time. Maximum 6 simultaneous non-modifier keys
-  (the boot-protocol report has 6 key slots).
-- Windows does not reliably re-initiate the link after sleep, so the helper re-dials on disconnect
-  (12 attempts, 5 s apart; `AUTORECONNECT 0` disables it, `disconnect` turns it off).
-- The phone keeps its "Phone" class-of-device, so the Windows UI labels/icons it as a phone.
-- The helper is a background process, not an app: aggressive battery optimisation or a Termux kill
-  ends the session. Use `termux-wake-lock`.
+- **US-QWERTY assumption.** HID sends scancodes, not characters. A non-US Windows layout mistypes
+  punctuation; letters and digits are fine. Non-ASCII/Unicode is not supported (that would need
+  Windows Alt-code sequences).
+- Requires the ROM to ship *and* enable `HidDeviceService`; many OEM ROMs do not.
+- Classic BR/EDR HID only, not BLE/HOGP. One host at a time. Maximum 6 simultaneous non-modifier keys.
+- The phone keeps its "Phone" class-of-device, so Windows labels it as a phone.
+- `start` changes a global setting (`settings_enable_monitor_phantom_procs=false`) so Android does not
+  reap the detached helper.
+- The helper is a background process, not an app: a Termux kill or aggressive battery optimisation ends
+  the session. Use `termux-wake-lock`.
+- `createBond()` / `cancelBondProcess()` / `removeBond()` are hidden or restricted APIs; phone-initiated
+  pairing may be refused locally even when everything else works. Pair from the PC or Android's UI.
 - While registered as an HID *device*, the phone should not be expected to act as an HID *host* for
   another keyboard at the same time.
 - Anything running as root or shell on the phone can read the session token in
   `/data/local/tmp/btkbd/` and type on your PC. That is inherent to a root tool.
-- The stubs pin a handful of framework signatures (`registerApp`, `sendReport`, `Callback`). If a
-  future Android changes them, `build` still succeeds but the helper fails at runtime — the fix is to
-  update the stub in `btkbd.sh` (`emit_sources`) or compile against a real `android.jar`.
+- The stubs pin a handful of framework signatures. If a future Android changes them, `build` still
+  succeeds but the helper fails at runtime — `probe`/`trace` print the real signatures so the stub or
+  the reflection can be adjusted.

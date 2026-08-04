@@ -991,8 +991,44 @@ cmd_stop() {
 # ===========================================================================
 # 8. pair / connect  (requirement 4)
 # ===========================================================================
-cmd_bond()   { server_running || { cmd_start || return 1; }; ctl "BOND ${1:-}"; }
-cmd_unbond() { server_running || { cmd_start || return 1; }; ctl "UNBOND ${1:-}"; }
+cmd_bond() {
+  server_running || { cmd_start || return 1; }
+  local reply
+  reply=$(ctl "BOND ${1:-}")
+  printf '%s\n' "$reply"
+  case $reply in OK*) return 0 ;; esac
+
+  # The stack's reason lives in the helper log and logcat, not in the reply.
+  info "--- helper's own bond trace ---"
+  sur "tail -12 $SRVLOG" 2>/dev/null | grep -E 'BOND|EVENT' | sed 's/^/     /'
+  info "--- why the stack refused (logcat) ---"
+  sur "logcat -d -b all -t 500" 2>/dev/null |
+    grep -iE 'createbond|bondstate|bonding|pairing|adapterservice.*bond' | tail -15 | sed 's/^/     /'
+  info "Note: createBond() returning false immediately means the local stack rejected it"
+  info "before anything went on air - the PC's pairing dialog is not involved yet."
+  info "Most common cause is a stale internal bond entry; clear it and retry:"
+  info "  bash ${BTKBD_SELF} unbond ${1:-<MAC>}"
+  info "  su -c 'cmd bluetooth_manager disable'; su -c 'cmd bluetooth_manager enable'   # cycles the stack"
+  info "  bash ${BTKBD_SELF} restart && bash ${BTKBD_SELF} bond ${1:-<MAC>}"
+  info "Or sidestep createBond() entirely and pair through Android's own UI (always"
+  info "permitted, one-time): su -c 'am start -a android.settings.BLUETOOTH_SETTINGS'"
+  info "then tap your PC in the list while its 'Add a device' dialog is open, and"
+  info "afterwards just: bash ${BTKBD_SELF} connect"
+  return 1
+}
+
+cmd_unbond() {
+  server_running || { cmd_start || return 1; }
+  local reply
+  reply=$(ctl "UNBOND ${1:-}")
+  printf '%s\n' "$reply"
+  case $reply in
+    OK*) return 0 ;;
+    *) info "if removeBond() is unavailable on this build, forget the device in"
+       info "Android Settings > Bluetooth instead: su -c 'am start -a android.settings.BLUETOOTH_SETTINGS'"
+       return 1 ;;
+  esac
+}
 
 cmd_pair() {
   hdr "Pairing with the Windows PC"
