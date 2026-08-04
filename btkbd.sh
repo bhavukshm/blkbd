@@ -798,14 +798,24 @@ cmd_start() {
   TOKEN=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
   state_save
 
-  # launcher script: keeps quoting sane and records the real pid
+  # The phantom-process reaper is stock AOSP behaviour since Android 12 (it kills
+  # apps' detached child processes), so this applies to plain AOSP builds too.
+  # Both knobs are best-effort and harmless if unsupported.
+  sur "settings put global settings_enable_monitor_phantom_procs false" >/dev/null 2>&1
+  sur "device_config put activity_manager max_phantom_processes 2147483647" >/dev/null 2>&1
+  info "phantom-process monitor: $(sur "settings get global settings_enable_monitor_phantom_procs" | tr -d '\r')"
+
+  # No exec: the wrapper stays alive to record why app_process exited, which is the
+  # one thing a detached launch otherwise never tells us.
   local run=$BTKBD_HOME/run.sh
   cat > "$run" <<RUNEOF
 #!/system/bin/sh
+echo "RUNSH start pid=\$\$ uid=\$(id -u)"
 echo \$\$ > $PIDFILE
 export CLASSPATH=$JAR
-exec app_process --nice-name=btkbd /system/bin dev.btkbd.Server \\
+app_process /system/bin dev.btkbd.Server \\
      --port $PORT --token $TOKEN --name "$BTKBD_DEVICE_NAME" --delay $BTKBD_DELAY_MS
+echo "RUNSH app_process exited rc=\$?"
 RUNEOF
   sur "cp '$run' $BTKBD_RUN/run.sh && chmod 755 $BTKBD_RUN/run.sh && chown 2000:2000 $BTKBD_RUN/run.sh" >/dev/null
   sur "rm -f $SRVLOG $PIDFILE; touch $SRVLOG; chown 2000:2000 $SRVLOG; chmod 666 $SRVLOG" >/dev/null
@@ -821,26 +831,52 @@ RUNEOF
   local launcher=sush
   have_shell_su || { launcher=sur; warn "running as root instead of shell"; }
 
-  # Run su in the foreground and KEEP its output: when the launch itself fails
-  # (su refused, app_process missing, dex rejected) that message is the whole story.
-  # The inner command backgrounds itself, so su still returns immediately.
   local launchlog=$BTKBD_HOME/launch.log
-  local cmd="{ setsid sh $BTKBD_RUN/run.sh || nohup sh $BTKBD_RUN/run.sh; } >>$SRVLOG 2>&1 </dev/null & echo launched-ok"
-  local -a SUCMD
-  if [ "$launcher" = sush ]; then SUCMD=("$BTKBD_SU" 2000 -c "$cmd"); else SUCMD=("$BTKBD_SU" -c "$cmd"); fi
-  if need_tool timeout; then
-    timeout 25 "${SUCMD[@]}" >"$launchlog" 2>&1
-  else
-    "${SUCMD[@]}" >"$launchlog" 2>&1
-  fi
-  grep -q launched-ok "$launchlog" 2>/dev/null || warn "su did not confirm the launch (see output below if this fails)"
+  # Pick the detach tool up front. Chaining with || would re-launch a second
+  # instance whenever app_process itself exits non-zero.
+  local detach=
+  if sur "command -v setsid" | grep -q setsid; then detach="setsid "
+  elif sur "command -v nohup" | grep -q nohup; then detach="nohup "
+  else warn "neither setsid nor nohup found"; fi
+  info "detach via: ${detach:-none}"
 
-  local i ok=
-  for i in $(seq 1 30); do
-    if port_open "$PORT"; then ok=port; break; fi
-    # spawning su is slow, so only consult the log occasionally
-    if [ $((i % 6)) = 0 ] && sur "grep -q 'LISTEN port=' $SRVLOG"; then ok=log; break; fi
-    sleep 0.5
+  local -a SU_PREFIX
+  if [ "$launcher" = sush ]; then SU_PREFIX=("$BTKBD_SU" 2000 -c); else SU_PREFIX=("$BTKBD_SU" -c); fi
+
+  # Two strategies, because "su backgrounds the helper and exits" leaves the helper
+  # orphaned - and some su builds tear down the whole process group on exit.
+  local i ok= strategy
+  for strategy in detach-inside-su su-stays-alive; do
+    info "launch strategy: $strategy"
+    : > "$launchlog"
+    case $strategy in
+      detach-inside-su)
+        # su returns immediately; the helper must survive on its own
+        local cmd="${detach}sh $BTKBD_RUN/run.sh >>$SRVLOG 2>&1 </dev/null & echo launched-ok"
+        if need_tool timeout; then
+          timeout 25 "${SU_PREFIX[@]}" "$cmd" >"$launchlog" 2>&1
+        else
+          "${SU_PREFIX[@]}" "$cmd" >"$launchlog" 2>&1
+        fi
+        grep -q launched-ok "$launchlog" 2>/dev/null || warn "su did not confirm the launch"
+        ;;
+      su-stays-alive)
+        # keep the su client itself alive as a detached Termux-side job, so the
+        # helper always has a living parent and is never orphaned
+        ( "${SU_PREFIX[@]}" "sh $BTKBD_RUN/run.sh" >>"$SRVLOG" 2>&1 </dev/null & ) 2>>"$launchlog"
+        disown 2>/dev/null
+        ;;
+    esac
+
+    for i in $(seq 1 24); do
+      if port_open "$PORT"; then ok=port; break; fi
+      # spawning su is slow, so only consult the log occasionally
+      if [ $((i % 6)) = 0 ] && sur "grep -q 'LISTEN port=' $SRVLOG"; then ok=log; break; fi
+      sleep 0.5
+    done
+    [ -n "$ok" ] && break
+    warn "strategy '$strategy' did not bring the helper up"
+    sur "tail -3 $SRVLOG" 2>/dev/null | sed 's/^/     /'
   done
 
   if [ -z "$ok" ]; then
@@ -855,6 +891,9 @@ RUNEOF
     info "--- process ---"
     info "     pid file: $(helper_pid || echo none)"
     info "     ps:       $(sur "ps -A -o pid,user,name" | grep -i btkbd || echo 'no btkbd process')"
+    info "--- was it killed? (phantom-process reaper / lmkd / ActivityManager) ---"
+    sur "logcat -d -b all -t 400" 2>/dev/null |
+      grep -iE 'phantom|lmkd|btkbd|app_process|dev\.btkbd' | tail -12 | sed 's/^/     /'
     info "--- crash buffer (ART aborts land here, not on stderr) ---"
     sur "logcat -d -b crash -t 40" 2>/dev/null | tail -12 | sed 's/^/     /'
     info "--- dex file ---"
