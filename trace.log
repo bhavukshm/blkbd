@@ -1,44 +1,71 @@
 
-=== Building the HID helper ===
-   compiler=javac dexer=d8
+=== Running the helper in the FOREGROUND (Ctrl-C to stop) ===
+   layer 1: su as root         -> 0
+   layer 2: su as uid 2000     -> 2000
+   layer 3: files in /data/local/tmp/btkbd
+     total 24
+     -r--r--r-- 1 shell shell 12707 2026-08-05 00:30 btkbd.jar
+     -rw-r--r-- 1 shell shell     5 2026-08-05 00:27 pid
+     -rwxr-xr-x 1 shell shell   256 2026-08-05 00:27 run.sh
+     -rw-rw-rw- 1 shell shell     0 2026-08-05 00:27 server.log
+   layer 4: app_process + dex  -> running --probe
+     PROBE uid=2000
+     PROBE BluetoothHidDevice=yes
+     PROBE BluetoothHidDeviceAppSdpSettings=yes
+     PROBE BluetoothHidDeviceAppQosSettings=yes
+     PROBE BluetoothAdapter=yes
+     SELINUX u:r:su:s0
+     SM bluetooth_manager binder=true
+     SM bluetooth binder=false
+     SM services matching bluetooth: android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default bluetooth_manager
+     INIT BluetoothServiceManager installed
+     ADAPTER route1 getDefaultAdapter=true
+     PROBE adapter=yes enabled=true
+     PROBE supportedProfiles=[7, 2, 13, 1, 21, 19, 4, 9, 20, 5, 6]
+     PROBE hidDeviceSupported=yes
 
-» Compile
-   what/why: Compiled against small hand-written android.* stubs, so no android.jar download is needed. The real framework classes win at runtime (parent-first class loading).
-   PASS classes built
+=== helper output (everything below comes straight from the helper) ===
+CONTEXT uid=2000 package=com.android.shell
+INIT BluetoothServiceManager installed
+ADAPTER route1 getDefaultAdapter=true
+ADAPTER enabled=true
+LISTEN port=8722
+PROXY connected
+REGISTERAPP call=true
+EVENT registered=1 plugged=DC:41:A9:15:2A:A1
+READY
 
-» Dex
-   what/why: Only dev/btkbd classes go into the dex; the stubs are passed as classpath so they never shadow the real framework.
-   PASS 24608 bytes
+=== helper exited (rc=130) ===
+   if you saw nothing at all above, app_process never started - check the crash buffer:
+     su -c 'logcat -d -b crash -t 60'
+nnn
+OUTPUT OF nlkbd.sh start
 
-» Package + install
-   what/why: app_process loads a jar containing classes.dex from CLASSPATH.
-   PASS installed /data/local/tmp/btkbd/btkbd.jar
-   PROBE uid=2000
-   PROBE BluetoothHidDevice=yes
-   PROBE BluetoothHidDeviceAppSdpSettings=yes
-   PROBE BluetoothHidDeviceAppQosSettings=yes
-   PROBE BluetoothAdapter=yes
-   SELINUX u:r:su:s0
-   SM bluetooth_manager binder=true
-   SM bluetooth binder=false
-   SM services matching bluetooth: android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default bluetooth_manager
-   INIT BluetoothServiceManager installed
-   ADAPTER route1 threw java.lang.NullPointerException: Attempt to read from field 'android.os.MessageQueue android.os.Looper.mQueue' on a null object reference in method 'void android.os.Handler.<init>(android.os.Looper, android.os.Handler$Callback, boolean, boolean)'
-   ADAPTER route3 bluetooth_manager binder=true
-   ADAPTER route3a createAdapter unavailable: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.createAdapter [class android.content.AttributionSource]
-   ADAPTER route3b constructor failed: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.<init> [interface android.bluetooth.IBluetoothManager, class android.content.AttributionSource]
-   PROBE adapter=no enabled=false
-   API ctor private android.bluetooth.BluetoothAdapter(android.bluetooth.IBluetoothManager,android.content.Context)
-   API ctor private android.bluetooth.BluetoothAdapter(android.bluetooth.IBluetoothManager,android.content.Context,android.content.AttributionSource)
-   API method public static android.bluetooth.BluetoothAdapter android.bluetooth.BluetoothAdapter.createAdapter(android.content.Context)
-   API method public android.bluetooth.IBluetoothManager android.bluetooth.BluetoothAdapter.getBluetoothManager()
-   API method public static synchronized android.bluetooth.BluetoothAdapter android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-   API init public static android.os.BluetoothServiceManager android.bluetooth.BluetoothFrameworkInitializer.getBluetoothServiceManager()
-   API init public static void android.bluetooth.BluetoothFrameworkInitializer.initializeBinderCallsStats(android.content.Context)
-   API init static android.bluetooth.BluetoothManager android.bluetooth.BluetoothFrameworkInitializer.lambda$registerServiceWrappers$0(android.content.Context)
-   API init public static void android.bluetooth.BluetoothFrameworkInitializer.registerServiceWrappers()
-   API init public static void android.bluetooth.BluetoothFrameworkInitializer.setBinderCallsStatsInitializer(java.util.function.Consumer)
-   API init public static void android.bluetooth.BluetoothFrameworkInitializer.setBluetoothServiceManager(android.os.BluetoothServiceManager)
-   API bsm ctor public android.os.BluetoothServiceManager()
-   API bsm method getBluetoothManagerServiceRegisterer
-   PROBE hidDeviceSupported=error java.lang.NullPointerException: null receiver
+=== Starting the HID helper ===
+   launching as uid 2000 (shell) - Android resolves that uid to com.android.shell, which holds BLUETOOTH_CONNECT
+   FAIL helper did not start
+   --- launch output (su / sh) ---
+     launched-ok
+   --- helper log (/data/local/tmp/btkbd/server.log) ---
+        (empty: app_process produced no output, so it never actually ran)
+   --- process ---
+        pid file: 7057
+        ps:       no btkbd process
+   --- crash buffer (ART aborts land here, not on stderr) ---
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.xiaomi.settings.telephony.EsimController.onBootCompleted(EsimController.kt:52)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.xiaomi.settings.BootCompletedReceiver.onBootCompleted(BootCompletedReceiver.kt:30)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.xiaomi.settings.BootCompletedReceiver.onReceive(BootCompletedReceiver.kt:24)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at android.app.ActivityThread.handleReceiver(ActivityThread.java:5302)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	... 10 more
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: Caused by: android.os.RemoteException: Remote stack trace:
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService.setEnabledSettings(PackageManagerService.java:4010)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService.-$$Nest$msetEnabledSettings(PackageManagerService.java:0)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService$IPackageManagerImpl.setApplicationEnabledSetting(PackageManagerService.java:5906)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at android.content.pm.IPackageManager$Stub.onTransact(IPackageManager.java:3220)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService$IPackageManagerImpl.onTransact(PackageManagerService.java:6713)
+     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 
+   --- dex file ---
+        -r--r--r-- 1 shell shell 12707 2026-08-05 00:30 /data/local/tmp/btkbd/btkbd.jar
+   --- run this by hand; the real error prints straight to your terminal ---
+        su 2000 -c 'CLASSPATH=/data/local/tmp/btkbd/btkbd.jar app_process /system/bin dev.btkbd.Server --port 8722 --token 67429de94e8f041bf8489232'
+   and check app_process works at all:  bash ./btkbd.sh probe
