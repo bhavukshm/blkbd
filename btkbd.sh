@@ -48,7 +48,7 @@ BTKBD_DEVICE_NAME=${BTKBD_DEVICE_NAME:-Bluetooth Keyboard}
 BTKBD_HID_PROP=bluetooth.profile.hid.device.enabled
 # Bumped whenever the helper's command set changes, so a stale running helper is
 # reported as such instead of answering "unknown-command".
-BTKBD_PROTO=2
+BTKBD_PROTO=3
 
 BTKBD_SELF=${BASH_SOURCE[0]}
 STATE=$BTKBD_HOME/state
@@ -947,6 +947,14 @@ cmd_trace() {
   have_root || { die "root required"; return 1; }
   sur "test -f $JAR" || { cmd_build || return 1; }
 
+  # Two helpers cannot share the control port; without this the foreground run
+  # dies on EADDRINUSE and looks like a new failure.
+  if server_running || helper_alive; then
+    warn "a helper is already running (pid $(helper_pid)) - stopping it so this one can bind"
+    cmd_stop >/dev/null 2>&1
+    sleep 1
+  fi
+
   info "layer 1: su as root         -> $(sur id -u 2>&1 | head -1)"
   info "layer 2: su as uid 2000     -> $(sush id -u 2>&1 | head -1)"
   info "layer 3: files in $BTKBD_RUN"
@@ -1318,7 +1326,7 @@ emit_sources() {
                               STATE_CONNECTED = 2, STATE_DISCONNECTING = 3;
 
       /** Must match BTKBD_PROTO in btkbd.sh; bumped whenever commands change. */
-      private static final String VERSION = "2";
+      private static final String VERSION = "3";
 
       private static String name = "Bluetooth Keyboard";
       private static String token = "";
@@ -1345,6 +1353,14 @@ emit_sources() {
           }
           try {
               run();
+          } catch (java.net.BindException e) {
+              // Almost always "a helper is already running" - that deserves a
+              // sentence, not a stack trace.
+              out("ERR control port " + port + " is already in use.");
+              out("HINT another helper is already running. Use it, or stop it first:");
+              out("HINT   bash btkbd.sh stop      (or: su -c 'pkill -f dev.btkbd.Server')");
+              out("HINT   bash btkbd.sh status    shows if it is registered/connected");
+              System.exit(2);
           } catch (Throwable t) {
               out("FATAL " + t);
               t.printStackTrace();
@@ -1837,6 +1853,7 @@ emit_sources() {
                + " registered=" + (registered ? 1 : 0)
               + " state=" + stateName(st)
               + " host=" + (t != null ? t.getAddress() : "none")
+               + " bond=" + (t != null ? bondStateName(t.getBondState()) : "NONE")
               + " adapter=" + (adapter != null && adapter.isEnabled() ? "on" : "off")
               + " uid=" + Process.myUid()
               + " autoreconnect=" + (autoReconnect ? 1 : 0)
@@ -1929,10 +1946,56 @@ emit_sources() {
           try { d = adapter.getRemoteDevice(mac.toUpperCase()); } catch (Throwable t) { return "ERR bad-mac " + t; }
           peer = d;
           int bs = d.getBondState();
+          out("BOND state-before=" + bondStateName(bs) + " " + d.getAddress());
           if (bs == BluetoothDevice.BOND_BONDED) return "OK already-bonded " + d.getAddress();
-          boolean ok;
-          try { ok = d.createBond(); } catch (Throwable t) { return "ERR createBond " + t; }
-          return ok ? "OK bonding " + d.getAddress() : "ERR createBond-refused";
+
+          // A bonding attempt left half-finished makes every later createBond()
+          // return false immediately, which looks like a flat refusal.
+          if (bs == BluetoothDevice.BOND_BONDING) {
+              try {
+                  Method c = BluetoothDevice.class.getMethod("cancelBondProcess");
+                  c.setAccessible(true);
+                  out("BOND cancelBondProcess=" + c.invoke(d));
+                  Thread.sleep(1500);
+              } catch (Throwable t) {
+                  out("BOND cancelBondProcess failed: " + t);
+              }
+          }
+
+          boolean ok = false;
+          try {
+              ok = d.createBond();
+              out("BOND createBond()=" + ok);
+          } catch (Throwable t) {
+              return "ERR createBond " + t;
+          }
+          if (!ok) {
+              // The default transport can resolve to LE; HID here is BR/EDR only.
+              try {
+                  Method m = BluetoothDevice.class.getMethod("createBond", int.class);
+                  m.setAccessible(true);
+                  Object r = m.invoke(d, 1); // TRANSPORT_BREDR
+                  ok = Boolean.TRUE.equals(r);
+                  out("BOND createBond(TRANSPORT_BREDR)=" + r);
+              } catch (Throwable t) {
+                  out("BOND createBond(transport) unavailable: " + t);
+              }
+          }
+          if (!ok) {
+              return "ERR createBond-refused state=" + bondStateName(d.getBondState())
+                   + " hint=open Windows' 'Add a device' dialog first so the PC accepts pairing";
+          }
+
+          // Report the outcome rather than just "we asked".
+          for (int i = 0; i < 20; i++) {
+              try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+              int s = d.getBondState();
+              if (s == BluetoothDevice.BOND_BONDED) return "OK bonded " + d.getAddress();
+              if (s == BluetoothDevice.BOND_NONE && i > 4) {
+                  return "ERR bond-failed (rejected or timed out) " + d.getAddress();
+              }
+          }
+          return "OK bonding " + d.getAddress() + " state=" + bondStateName(d.getBondState());
       }
 
       /** removeBond() is hidden API - the only way to clear a stale link key from here. */
