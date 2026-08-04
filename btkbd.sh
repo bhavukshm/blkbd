@@ -46,6 +46,9 @@ BTKBD_DELAY_MS=${BTKBD_DELAY_MS:-6}             # pause after every HID report
 BTKBD_SU=${BTKBD_SU:-su}
 BTKBD_DEVICE_NAME=${BTKBD_DEVICE_NAME:-Bluetooth Keyboard}
 BTKBD_HID_PROP=bluetooth.profile.hid.device.enabled
+# Bumped whenever the helper's command set changes, so a stale running helper is
+# reported as such instead of answering "unknown-command".
+BTKBD_PROTO=2
 
 BTKBD_SELF=${BASH_SOURCE[0]}
 STATE=$BTKBD_HOME/state
@@ -256,6 +259,16 @@ link_up() {
   if ! IFS= read -r -t 5 reply <&"$BTKBD_IN" || [ "${reply:0:2}" != OK ]; then
     err "helper rejected AUTH (${reply:-no reply})"
     link_down; return 1
+  fi
+  # A helper built from an older copy of this script answers "unknown-command"
+  # for anything new; say so plainly instead.
+  local v=
+  case $reply in *version=*) v=${reply##*version=}; v=${v%% *} ;; esac
+  if [ "$v" != "$BTKBD_PROTO" ]; then
+    warn "the running helper is build '${v:-pre-versioning}' but this script expects $BTKBD_PROTO"
+    warn "it will not understand newer commands. Rebuild and restart it:"
+    warn "  bash ${BTKBD_SELF} build && bash ${BTKBD_SELF} restart"
+    warn "(if you are running it via 'trace', Ctrl-C that session and re-run trace)"
   fi
   ctl "DELAY $BTKBD_DELAY_MS" >/dev/null
   return 0
@@ -1304,6 +1317,9 @@ emit_sources() {
       private static final int STATE_DISCONNECTED = 0, STATE_CONNECTING = 1,
                               STATE_CONNECTED = 2, STATE_DISCONNECTING = 3;
 
+      /** Must match BTKBD_PROTO in btkbd.sh; bumped whenever commands change. */
+      private static final String VERSION = "2";
+
       private static String name = "Bluetooth Keyboard";
       private static String token = "";
       private static int port = 8722;
@@ -1773,7 +1789,7 @@ emit_sources() {
                   s.close();
                   return;
               }
-              w.println("OK auth");
+              w.println("OK auth version=" + VERSION);
               String line;
               while ((line = in.readLine()) != null) {
                   if (line.length() == 0) continue;
@@ -1817,7 +1833,8 @@ emit_sources() {
           if (hid != null && t != null) {
               try { st = hid.getConnectionState(t); } catch (Throwable ignored) { }
           }
-          return "OK registered=" + (registered ? 1 : 0)
+          return "OK version=" + VERSION
+               + " registered=" + (registered ? 1 : 0)
               + " state=" + stateName(st)
               + " host=" + (t != null ? t.getAddress() : "none")
               + " adapter=" + (adapter != null && adapter.isEnabled() ? "on" : "off")
