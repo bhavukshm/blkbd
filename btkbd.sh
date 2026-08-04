@@ -970,9 +970,35 @@ cmd_stop() {
 # ===========================================================================
 # 8. pair / connect  (requirement 4)
 # ===========================================================================
+cmd_bond()   { server_running || { cmd_start || return 1; }; ctl "BOND ${1:-}"; }
+cmd_unbond() { server_running || { cmd_start || return 1; }; ctl "UNBOND ${1:-}"; }
+
 cmd_pair() {
   hdr "Pairing with the Windows PC"
   server_running || { cmd_start || return 1; }
+
+  # Without a registered HID app the phone advertises no keyboard service, and
+  # Windows fails with "Couldn't connect".
+  case $(ctl '?') in
+    *registered=1*) pass "HID keyboard is registered - Windows will find a keyboard service" ;;
+    *) fail "the helper is not registered as a keyboard yet"
+       info "pair only after 'start' (or 'trace') has reported READY"
+       return 1 ;;
+  esac
+
+  local bonded; bonded=$(ctl BONDED); bonded=${bonded#OK }; bonded=${bonded# }
+  if [ -n "$bonded" ]; then
+    warn "the phone already holds bond(s): $bonded"
+    warn "If Windows shows the phone under \"Add a device\" and then says"
+    warn "\"Couldn't connect\", the two sides disagree about the link key: the phone"
+    warn "kept it, Windows did not. Clear BOTH sides, then pair again:"
+    warn "  1) Windows: Settings > Bluetooth & devices > (phone) > Remove device"
+    warn "  2) phone:   bash ${BTKBD_SELF} unbond <MAC>"
+    warn "  3) phone:   bash ${BTKBD_SELF} pair"
+  fi
+  info "Alternative that often works when Windows-initiated pairing fails:"
+  info "  open Windows' 'Add a device' dialog (that makes the PC pairable), then run"
+  info "  bash ${BTKBD_SELF} bond <WINDOWS-MAC>     # phone initiates the bond"
 
   cat <<'EOT'
    How Bluetooth HID pairing works here:
@@ -1155,6 +1181,8 @@ btkbd.sh - Bluetooth HID keyboard from a rooted Android phone
   bash btkbd.sh pair               guided first-time pairing with the PC
   bash btkbd.sh connect [MAC]      reuse an existing pairing
   bash btkbd.sh disconnect
+  bash btkbd.sh bond MAC           phone initiates pairing with the PC
+  bash btkbd.sh unbond [MAC]       clear a stale bond/link key on the phone side
   bash btkbd.sh status             registered / bonded / connected
   bash btkbd.sh up                 check -> enable -> build -> start -> connect
   bash btkbd.sh type "text"        type text on the PC
@@ -1772,6 +1800,8 @@ emit_sources() {
               if (cmd.equals("BONDED")) return bonded();
               if (cmd.equals("C")) return connect(arg);
               if (cmd.equals("D")) return disconnect();
+              if (cmd.equals("BOND")) return bond(arg);
+              if (cmd.equals("UNBOND")) return unbond(arg);
               if (cmd.equals("DISCOVERABLE")) return discoverable(arg);
               if (cmd.equals("AUTORECONNECT")) { autoReconnect = !"0".equals(arg); return "OK autoreconnect=" + autoReconnect; }
               if (cmd.equals("Q")) return "OK bye";
@@ -1814,7 +1844,8 @@ emit_sources() {
               if (set != null) {
                   for (BluetoothDevice d : set) {
                       if (!first) sb.append(',');
-                      sb.append(d.getAddress()).append('|').append(d.getName());
+                      sb.append(d.getAddress()).append('|').append(d.getName())
+                        .append('|').append(bondStateName(d.getBondState()));
                       first = false;
                   }
               }
@@ -1863,6 +1894,48 @@ emit_sources() {
           boolean ok;
           try { ok = hid.connect(d); } catch (Throwable t) { return "ERR connect " + t; }
           return ok ? "OK connecting " + d.getAddress() : "ERR connect-refused";
+      }
+
+      private static String bondStateName(int s) {
+          switch (s) {
+              case BluetoothDevice.BOND_BONDED: return "BONDED";
+              case BluetoothDevice.BOND_BONDING: return "BONDING";
+              default: return "NONE";
+          }
+      }
+
+      /** Let the phone initiate pairing; often succeeds where Windows-initiated fails. */
+      private static String bond(String mac) {
+          if (adapter == null) return "ERR no-adapter";
+          if (mac == null || mac.length() == 0) return "ERR need-mac";
+          BluetoothDevice d;
+          try { d = adapter.getRemoteDevice(mac.toUpperCase()); } catch (Throwable t) { return "ERR bad-mac " + t; }
+          peer = d;
+          int bs = d.getBondState();
+          if (bs == BluetoothDevice.BOND_BONDED) return "OK already-bonded " + d.getAddress();
+          boolean ok;
+          try { ok = d.createBond(); } catch (Throwable t) { return "ERR createBond " + t; }
+          return ok ? "OK bonding " + d.getAddress() : "ERR createBond-refused";
+      }
+
+      /** removeBond() is hidden API - the only way to clear a stale link key from here. */
+      private static String unbond(String mac) {
+          if (adapter == null) return "ERR no-adapter";
+          BluetoothDevice d;
+          if (mac == null || mac.length() == 0) {
+              d = target();
+              if (d == null) return "ERR need-mac";
+          } else {
+              try { d = adapter.getRemoteDevice(mac.toUpperCase()); } catch (Throwable t) { return "ERR bad-mac " + t; }
+          }
+          try {
+              Method m = BluetoothDevice.class.getMethod("removeBond");
+              m.setAccessible(true);
+              Object r = m.invoke(d);
+              return "OK removeBond=" + r + " " + d.getAddress();
+          } catch (Throwable t) {
+              return "ERR removeBond " + t;
+          }
       }
 
       private static String disconnect() {
@@ -2099,6 +2172,8 @@ btkbd_main() {
     pair)               cmd_pair "$@" ;;
     connect)            cmd_connect "$@" ;;
     disconnect)         cmd_disconnect "$@" ;;
+    bond)               cmd_bond "$@" ;;
+    unbond|forget)      cmd_unbond "$@" ;;
     status)             cmd_status "$@" ;;
     up)                 cmd_up "$@" ;;
     probe)              cmd_probe "$@" ;;
