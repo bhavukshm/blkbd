@@ -1,50 +1,44 @@
 
-=== Running the helper in the FOREGROUND (Ctrl-C to stop) ===
-   layer 1: su as root         -> 0
-   layer 2: su as uid 2000     -> 2000
-   layer 3: files in /data/local/tmp/btkbd
-     total 20
-     -r--r--r-- 1 shell shell 11451 2026-08-05 00:12 btkbd.jar
-     -rw-r--r-- 1 shell shell     6 2026-08-05 00:02 pid
-     -rwxr-xr-x 1 shell shell   256 2026-08-05 00:02 run.sh
-     -rw-rw-rw- 1 shell shell     0 2026-08-05 00:02 server.log
-   layer 4: app_process + dex  -> running --probe
-     PROBE uid=2000
-     PROBE BluetoothHidDevice=yes
-     PROBE BluetoothHidDeviceAppSdpSettings=yes
-     PROBE BluetoothHidDeviceAppQosSettings=yes
-     PROBE BluetoothAdapter=yes
-     SELINUX u:r:su:s0
-     SM bluetooth_manager binder=true
-     SM bluetooth binder=false
-     SM services matching bluetooth: android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default bluetooth_manager
-     ADAPTER route1 getDefaultAdapter=false
-     ADAPTER route3 bluetooth_manager binder=true
-     ADAPTER route3a createAdapter unavailable: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.createAdapter [class android.content.AttributionSource]
-     ADAPTER route3b constructor failed: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.<init> [interface android.bluetooth.IBluetoothManager, class android.content.AttributionSource]
-     PROBE adapter=no enabled=false
-     PROBE hidDeviceSupported=error java.lang.NullPointerException: null receiver
+=== Building the HID helper ===
+   compiler=javac dexer=d8
 
-=== helper output (everything below comes straight from the helper) ===
-CONTEXT uid=2000 package=com.android.shell
-ADAPTER route1 getDefaultAdapter=false
-ADAPTER route2 getSystemService=true
-ADAPTER route2 getAdapter=false
-ADAPTER route3 bluetooth_manager binder=true
-ADAPTER route3a createAdapter unavailable: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.createAdapter [class android.content.AttributionSource]
-ADAPTER route3b constructor failed: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.<init> [interface android.bluetooth.IBluetoothManager, class android.content.AttributionSource]
-ERR could not obtain a BluetoothAdapter by any route.
-HINT every route needs ServiceManager to hand this process the bluetooth_manager
-HINT binder. If SELINUX above is not u:r:shell:s0 or u:r:magisk:s0, the SELinux
-HINT domain is likely being denied 'find' on bluetooth_manager_service -
-HINT check: su -c 'logcat -d -b all | grep -i "avc.*bluetooth_manager"'
-FATAL java.lang.IllegalStateException: no BluetoothAdapter
-java.lang.IllegalStateException: no BluetoothAdapter
-	at dev.btkbd.Server.run(Server.java:168)
-	at dev.btkbd.Server.main(Server.java:105)
-	at com.android.internal.os.RuntimeInit.nativeFinishInit(Native Method)
-	at com.android.internal.os.RuntimeInit.main(RuntimeInit.java:369)
+» Compile
+   what/why: Compiled against small hand-written android.* stubs, so no android.jar download is needed. The real framework classes win at runtime (parent-first class loading).
+   PASS classes built
 
-=== helper exited (rc=1) ===
-   if you saw nothing at all above, app_process never started - check the crash buffer:
-     su -c 'logcat -d -b crash -t 60'
+» Dex
+   what/why: Only dev/btkbd classes go into the dex; the stubs are passed as classpath so they never shadow the real framework.
+   PASS 24608 bytes
+
+» Package + install
+   what/why: app_process loads a jar containing classes.dex from CLASSPATH.
+   PASS installed /data/local/tmp/btkbd/btkbd.jar
+   PROBE uid=2000
+   PROBE BluetoothHidDevice=yes
+   PROBE BluetoothHidDeviceAppSdpSettings=yes
+   PROBE BluetoothHidDeviceAppQosSettings=yes
+   PROBE BluetoothAdapter=yes
+   SELINUX u:r:su:s0
+   SM bluetooth_manager binder=true
+   SM bluetooth binder=false
+   SM services matching bluetooth: android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default bluetooth_manager
+   INIT BluetoothServiceManager installed
+   ADAPTER route1 threw java.lang.NullPointerException: Attempt to read from field 'android.os.MessageQueue android.os.Looper.mQueue' on a null object reference in method 'void android.os.Handler.<init>(android.os.Looper, android.os.Handler$Callback, boolean, boolean)'
+   ADAPTER route3 bluetooth_manager binder=true
+   ADAPTER route3a createAdapter unavailable: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.createAdapter [class android.content.AttributionSource]
+   ADAPTER route3b constructor failed: java.lang.NoSuchMethodException: android.bluetooth.BluetoothAdapter.<init> [interface android.bluetooth.IBluetoothManager, class android.content.AttributionSource]
+   PROBE adapter=no enabled=false
+   API ctor private android.bluetooth.BluetoothAdapter(android.bluetooth.IBluetoothManager,android.content.Context)
+   API ctor private android.bluetooth.BluetoothAdapter(android.bluetooth.IBluetoothManager,android.content.Context,android.content.AttributionSource)
+   API method public static android.bluetooth.BluetoothAdapter android.bluetooth.BluetoothAdapter.createAdapter(android.content.Context)
+   API method public android.bluetooth.IBluetoothManager android.bluetooth.BluetoothAdapter.getBluetoothManager()
+   API method public static synchronized android.bluetooth.BluetoothAdapter android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+   API init public static android.os.BluetoothServiceManager android.bluetooth.BluetoothFrameworkInitializer.getBluetoothServiceManager()
+   API init public static void android.bluetooth.BluetoothFrameworkInitializer.initializeBinderCallsStats(android.content.Context)
+   API init static android.bluetooth.BluetoothManager android.bluetooth.BluetoothFrameworkInitializer.lambda$registerServiceWrappers$0(android.content.Context)
+   API init public static void android.bluetooth.BluetoothFrameworkInitializer.registerServiceWrappers()
+   API init public static void android.bluetooth.BluetoothFrameworkInitializer.setBinderCallsStatsInitializer(java.util.function.Consumer)
+   API init public static void android.bluetooth.BluetoothFrameworkInitializer.setBluetoothServiceManager(android.os.BluetoothServiceManager)
+   API bsm ctor public android.os.BluetoothServiceManager()
+   API bsm method getBluetoothManagerServiceRegisterer
+   PROBE hidDeviceSupported=error java.lang.NullPointerException: null receiver
