@@ -1285,6 +1285,7 @@ emit_sources() {
           dumpServiceVisibility();
           BluetoothAdapter a = acquireAdapter();
           out("PROBE adapter=" + (a != null ? "yes" : "no") + " enabled=" + (a != null && a.isEnabled()));
+          if (a == null) dumpAdapterApi();
           // getSupportedProfiles() is @hide, but it is the list Config/BluetoothProperties
           // actually produced on this build - the most authoritative answer to
           // "does this ROM support HID Device" short of the profile already running.
@@ -1318,10 +1319,11 @@ emit_sources() {
           adapter = acquireAdapter();
           if (adapter == null) {
               out("ERR could not obtain a BluetoothAdapter by any route.");
-              out("HINT every route needs ServiceManager to hand this process the bluetooth_manager");
-              out("HINT binder. If SELINUX above is not u:r:shell:s0 or u:r:magisk:s0, the SELinux");
-              out("HINT domain is likely being denied 'find' on bluetooth_manager_service -");
-              out("HINT check: su -c 'logcat -d -b all | grep -i \"avc.*bluetooth_manager\"'");
+              dumpServiceVisibility();
+              dumpAdapterApi();
+              out("HINT the binder is visible, so this is not SELinux: BluetoothAdapter simply cannot");
+              out("HINT reach the mainline BluetoothServiceManager from a headless process. The API");
+              out("HINT shapes printed above show which factory/constructor this build actually has.");
               throw new IllegalStateException("no BluetoothAdapter");
           }
           out("ADAPTER enabled=" + adapter.isEnabled());
@@ -1391,12 +1393,63 @@ emit_sources() {
       }
 
       /**
-       * getDefaultAdapter() returns null whenever ServiceManager will not hand this
-       * process the bluetooth_manager binder, and getSystemService() on a synthetic
-       * context is no more reliable. So try every route and say which one worked.
+       * Bluetooth is a mainline module, so BluetoothAdapter does not use
+       * ServiceManager.getService() - it asks BluetoothFrameworkInitializer for a
+       * BluetoothServiceManager. ActivityThread installs that during normal app
+       * binding, which a headless app_process never performs, leaving the registerer
+       * unset and every adapter null. Install it ourselves.
        */
+      private static void initFrameworkServiceManager() {
+          try {
+              Class<?> smClass = Class.forName("android.os.BluetoothServiceManager");
+              Constructor<?> ctor = smClass.getDeclaredConstructor();
+              ctor.setAccessible(true);
+              Object sm = ctor.newInstance();
+              Class<?> init = Class.forName("android.bluetooth.BluetoothFrameworkInitializer");
+              Method set = init.getDeclaredMethod("setBluetoothServiceManager", smClass);
+              set.setAccessible(true);
+              set.invoke(null, sm);
+              out("INIT BluetoothServiceManager installed");
+          } catch (Throwable t) {
+              // "called twice" simply means something already set it - not a problem
+              out("INIT BluetoothServiceManager: " + t);
+          }
+      }
+
+      /** Print the real shapes, so a wrong guess above is immediately visible. */
+      private static void dumpAdapterApi() {
+          try {
+              for (Constructor<?> c : BluetoothAdapter.class.getDeclaredConstructors()) {
+                  out("API ctor " + c);
+              }
+              for (Method m : BluetoothAdapter.class.getDeclaredMethods()) {
+                  String n = m.getName();
+                  if (n.toLowerCase().contains("createadapter") || n.equals("getDefaultAdapter")
+                          || n.contains("ServiceManager") || n.contains("getBluetoothManager")) {
+                      out("API method " + m);
+                  }
+              }
+          } catch (Throwable t) {
+              out("API dump (BluetoothAdapter) failed: " + t);
+          }
+          try {
+              Class<?> init = Class.forName("android.bluetooth.BluetoothFrameworkInitializer");
+              for (Method m : init.getDeclaredMethods()) out("API init " + m);
+          } catch (Throwable t) {
+              out("API dump (BluetoothFrameworkInitializer) failed: " + t);
+          }
+          try {
+              Class<?> smClass = Class.forName("android.os.BluetoothServiceManager");
+              for (Constructor<?> c : smClass.getDeclaredConstructors()) out("API bsm ctor " + c);
+              for (Method m : smClass.getDeclaredMethods()) out("API bsm method " + m.getName());
+          } catch (Throwable t) {
+              out("API dump (BluetoothServiceManager) failed: " + t);
+          }
+      }
+
       private static BluetoothAdapter acquireAdapter() {
           BluetoothAdapter a = null;
+          initFrameworkServiceManager();
 
           try {
               a = BluetoothAdapter.getDefaultAdapter();
