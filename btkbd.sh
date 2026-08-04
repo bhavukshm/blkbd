@@ -284,8 +284,9 @@ ctl() {
 send_report() {
   ctl "R $1" >/dev/null && return 0
   case ${BTKBD_REPLY:-} in
-    *no-host*)        err "no HID host connected - Windows must be connected, not just paired."
+    *not-connected*)  err "the HID link is not open (${BTKBD_REPLY#ERR not-connected }) - paired is not enough."
                       err "run: bash ${BTKBD_SELF} connect     (or click the phone on Windows)" ;;
+    *no-host*)        err "no HID host known yet - pair first: bash ${BTKBD_SELF} pair" ;;
     *not-registered*) err "the helper is not registered as a keyboard - run: bash ${BTKBD_SELF} start" ;;
     *send-failed*)    err "the stack refused the report (link dropped?) - bash ${BTKBD_SELF} status" ;;
     "")               err "no reply from the helper - bash ${BTKBD_SELF} status" ;;
@@ -1828,6 +1829,11 @@ emit_sources() {
           if (!registered) return "ERR not-registered";
           BluetoothDevice d = target();
           if (d == null) return "ERR no-host";
+          // A virtually-cabled host is not necessarily a connected one; without this
+          // check the caller only sees a vague send-failed.
+          int cs = STATE_DISCONNECTED;
+          try { cs = hid.getConnectionState(d); } catch (Throwable ignored) { }
+          if (cs != STATE_CONNECTED) return "ERR not-connected state=" + stateName(cs) + " host=" + d.getAddress();
           byte[] data = parseHex(hex);
           if (data.length != 8) return "ERR report-must-be-8-bytes";
           boolean ok;
