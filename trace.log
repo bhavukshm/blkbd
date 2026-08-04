@@ -3,11 +3,11 @@
    layer 1: su as root         -> 0
    layer 2: su as uid 2000     -> 2000
    layer 3: files in /data/local/tmp/btkbd
-     total 24
-     -r--r--r-- 1 shell shell 12707 2026-08-05 00:30 btkbd.jar
-     -rw-r--r-- 1 shell shell     5 2026-08-05 00:27 pid
-     -rwxr-xr-x 1 shell shell   256 2026-08-05 00:27 run.sh
-     -rw-rw-rw- 1 shell shell     0 2026-08-05 00:27 server.log
+     total 28
+     -r--r--r-- 1 shell shell 13279 2026-08-05 01:25 btkbd.jar
+     -rw-r--r-- 1 shell shell     6 2026-08-05 01:26 pid
+     -rwxr-xr-x 1 shell shell   310 2026-08-05 01:26 run.sh
+     -rw-rw-rw- 1 shell shell   252 2026-08-05 01:26 server.log
    layer 4: app_process + dex  -> running --probe
      PROBE uid=2000
      PROBE BluetoothHidDevice=yes
@@ -29,43 +29,24 @@ CONTEXT uid=2000 package=com.android.shell
 INIT BluetoothServiceManager installed
 ADAPTER route1 getDefaultAdapter=true
 ADAPTER enabled=true
-LISTEN port=8722
-PROXY connected
-REGISTERAPP call=true
-EVENT registered=1 plugged=DC:41:A9:15:2A:A1
-READY
+FATAL java.net.BindException: bind failed: EADDRINUSE (Address already in use)
+java.net.BindException: bind failed: EADDRINUSE (Address already in use)
+	at libcore.io.IoBridge.bind(IoBridge.java:149)
+	at java.net.PlainSocketImpl.socketBind(PlainSocketImpl.java:162)
+	at java.net.AbstractPlainSocketImpl.bind(AbstractPlainSocketImpl.java:427)
+	at java.net.ServerSocket.bind(ServerSocket.java:399)
+	at java.net.ServerSocket.<init>(ServerSocket.java:259)
+	at dev.btkbd.Server.startControlServer(Server.java:520)
+	at dev.btkbd.Server.run(Server.java:182)
+	at dev.btkbd.Server.main(Server.java:109)
+	at com.android.internal.os.RuntimeInit.nativeFinishInit(Native Method)
+	at com.android.internal.os.RuntimeInit.main(RuntimeInit.java:369)
+Caused by: android.system.ErrnoException: bind failed: EADDRINUSE (Address already in use)
+	at libcore.io.Linux.bind(Native Method)
+	at libcore.io.ForwardingOs.bind(ForwardingOs.java:139)
+	at libcore.io.IoBridge.bind(IoBridge.java:145)
+	... 9 more
 
-=== helper exited (rc=130) ===
+=== helper exited (rc=1) ===
    if you saw nothing at all above, app_process never started - check the crash buffer:
      su -c 'logcat -d -b crash -t 60'
-nnn
-OUTPUT OF nlkbd.sh start
-
-=== Starting the HID helper ===
-   launching as uid 2000 (shell) - Android resolves that uid to com.android.shell, which holds BLUETOOTH_CONNECT
-   FAIL helper did not start
-   --- launch output (su / sh) ---
-     launched-ok
-   --- helper log (/data/local/tmp/btkbd/server.log) ---
-        (empty: app_process produced no output, so it never actually ran)
-   --- process ---
-        pid file: 7057
-        ps:       no btkbd process
-   --- crash buffer (ART aborts land here, not on stderr) ---
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.xiaomi.settings.telephony.EsimController.onBootCompleted(EsimController.kt:52)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.xiaomi.settings.BootCompletedReceiver.onBootCompleted(BootCompletedReceiver.kt:30)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.xiaomi.settings.BootCompletedReceiver.onReceive(BootCompletedReceiver.kt:24)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at android.app.ActivityThread.handleReceiver(ActivityThread.java:5302)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	... 10 more
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: Caused by: android.os.RemoteException: Remote stack trace:
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService.setEnabledSettings(PackageManagerService.java:4010)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService.-$$Nest$msetEnabledSettings(PackageManagerService.java:0)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService$IPackageManagerImpl.setApplicationEnabledSetting(PackageManagerService.java:5906)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at android.content.pm.IPackageManager$Stub.onTransact(IPackageManager.java:3220)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 	at com.android.server.pm.PackageManagerService$IPackageManagerImpl.onTransact(PackageManagerService.java:6713)
-     08-04 23:43:12.016 20684 20684 E AndroidRuntime: 
-   --- dex file ---
-        -r--r--r-- 1 shell shell 12707 2026-08-05 00:30 /data/local/tmp/btkbd/btkbd.jar
-   --- run this by hand; the real error prints straight to your terminal ---
-        su 2000 -c 'CLASSPATH=/data/local/tmp/btkbd/btkbd.jar app_process /system/bin dev.btkbd.Server --port 8722 --token 67429de94e8f041bf8489232'
-   and check app_process works at all:  bash ./btkbd.sh probe
